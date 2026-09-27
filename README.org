@@ -1,0 +1,170 @@
+#+TITLE: antilint — what an autopackaged package must never contain or do
+#+AUTHOR: Andrew Dougherty
+
+* What it is
+
+antilint is a SWI-Prolog judge for the output of [[https://github.com/aindilis/autopackager][autopackager]], an
+LLM-driven Debian packaging pipeline.  It extracts facts from a
+generated source tree, its =.deb= files and its build logs, runs a rule
+base over them, and exits non-zero if an error-level rule fires.
+
+Lintian says what Debian considers wrong with a package.  antilint says
+what is wrong with an /autopackaged/ package: the shortcuts a generator
+takes when "it builds and lintian is quiet" is the only test.  Examples
+are a lintian override in place of a fix, a patch that changes nothing,
+a network fetch during the build, and an install step that can silently
+ship an empty package.  The model can be told about the rules, but it
+cannot edit them, and antilint has no overrides.
+
+The design and its motivation are in the paper /Specifying What Not to
+Do/, in [[file:doc/][doc/]] (LaTeX source and PDF).
+
+*Status:* early; see [[file:ROADMAP.org][ROADMAP.org]] for what comes next.  It has been exercised on a handful of real
+autopackager outputs and Debian packages; see the paper's "Implementation
+status" section.  Not yet wired into autopackager's build loop.
+
+* Why "anti"-lint?
+
+It is not against lint.  Lintian asks whether a package follows Debian
+Policy, and it assumes a good-faith human maintainer: a maintainer can
+override a tag with a reason, and lintian trusts that.  antilint asks a
+different question: did the /generator/ take a shortcut to get past the
+checks?  Its rules are anti-patterns, and several of them are about
+defeating lint itself, such as writing an override instead of a fix.
+So antilint runs alongside lintian (with =--no-override=), not instead
+of it, and it should not duplicate checks lintian already makes.
+
+* Relation to autopackager and packaging-queue
+
+antilint is a separate program on purpose.  [[https://github.com/aindilis/packaging-queue][packaging-queue]] is a
+scheduler, and antilint is a judge.  autopackager is meant to call
+antilint after lintian (run with =--no-override=) and treat a non-zero
+exit as a failed iteration; the queue only ever sees the resulting
+attempt outcome.
+
+* Requirements
+
+- SWI-Prolog 9.x
+- =dpkg-deb= (to read =.deb= contents), for checks on built packages
+
+* Install
+
+#+begin_src sh
+git clone https://github.com/aindilis/antilint.git ~/antilint
+cd ~/antilint
+swipl -g run_tests -t halt tests/test_antilint.pl
+#+end_src
+
+All tests should pass.  Choice-point warnings are harmless.
+
+Then put a small wrapper on your =PATH= (a script rather than an alias,
+so it also works from =sh=, cron and org-babel):
+
+#+begin_src sh
+mkdir -p ~/bin
+printf '#!/bin/sh\nexec swipl "$HOME/antilint/antilint.pl" "$@"\n' > ~/bin/antilint
+chmod +x ~/bin/antilint
+antilint rules
+#+end_src
+
+=antilint rules= should list the 20 core rules, all =active=, with no
+evidence yet.
+
+* Data directory
+
+antilint keeps an append-only record of snapshots, verdicts, findings,
+proposed rules, endorsements and waivers.  It lives in =$ANTILINT_DATA=,
+or =data/= beside =antilint.pl= if that is unset (=data/= is
+git-ignored).  *A fresh clone starts with an empty store*: every
+installation builds its own judgement history.  If you want that
+history versioned, point =ANTILINT_DATA= at a directory in a repository
+of its own.
+
+* Usage
+
+#+begin_example
+antilint check SRC [--pkg P] [--attempt N] [--debs DIR|none] [--lintian F]
+               [--build-log F] [--verify pass|fail] [--expect F] [--deep]
+               [--snapshot] [--json]        judge one attempt; exit 1 on error
+antilint gold SRC [--pkg P]                 snapshot known-good packaging
+antilint judge SUBJECT good|bad WHO [WHY]   record a human verdict (pkg@attempt)
+antilint rules                              all rules, derived status, evidence
+antilint why RULE                           justification for a rule's status
+antilint snapshots                          snapshots and their verdicts
+antilint unexplained                        bad artifacts no error rule catches
+antilint finding PKG WHO TEXT               record a review finding
+antilint retract FINDING WHY                withdraw a finding
+antilint propose FINDING SCHEMA SEV TITLE HINT
+                                            learn a rule from a finding
+antilint endorse RULE WHO                   let a learned rule fail builds
+antilint veto RULE WHO WHY                  retire a rule
+antilint waive RULE PKG|* WHO WHY [WITNESS] human exception, recorded
+antilint suggest SUBJECT                    candidate rule text for a gap
+antilint induce [--min N] [--max N]         auto-propose rules from gaps
+antilint schemas                            learnable rule templates
+#+end_example
+
+A typical first session:
+
+#+begin_src sh
+# Judge a generated tree without recording anything
+antilint check path/to/generated-tree --debs none; echo "exit=$?"
+
+# Seed a known-good corpus from Debian's own packaging (needs deb-src)
+apt source eprover
+antilint gold eprover-*/
+antilint rules      # any core rule firing on gold is a false positive to inspect
+#+end_src
+
+** From autopackager
+
+#+begin_src sh
+antilint check "$SRC" --attempt "$N" --lintian "$LINTIAN_LOG" \
+  --build-log "$BUILD_LOG" --verify "$VERIFY" --snapshot --json
+#+end_src
+
+A non-zero exit fails the iteration.  The JSON's =violations= (title,
+witnesses, hint, previously_fixed_in) go into the revision prompt, so a
+failed check is also feedback to the model.
+
+* How rules are trusted
+
+Rule /status/ is maintained as a justification-based truth maintenance
+problem.  Status is never stored; it is derived on every query from the
+append-only event record, and =antilint why RULE= prints the grounds.
+
+- *Core rules* (AL01–AL11) are active unless they fire on a package
+  judged good, in which case they are marked =disputed= for a human to
+  look at.  Rules listed as =generator_only= (currently AL01) are about
+  what the generator may do, so a human-maintained gold package doing
+  the same thing with a reason is not held against them.
+- *Learned rules* come from review findings, as instances of a small set
+  of fixed schemas (=antilint schemas=), never arbitrary Prolog.  Evidence
+  alone can raise a learned rule to =trial=, which is capped at =warn=.
+  Only a named human's endorsement lets it fail a build, and a single
+  counterexample from the gold corpus demotes it to =suspended=
+  regardless.  Retracting every finding that supports a rule takes it
+  out without anyone editing it.
+
+The fact base is not under truth maintenance: facts are re-extracted
+from the artifacts on every run.
+
+* Layout
+
+| File                 | Role                                                     |
+|----------------------+----------------------------------------------------------|
+| =antilint.pl=        | CLI                                                      |
+| =lib/vocab.pl=       | fact vocabulary; every fact keyed by subject =Pkg@Att=   |
+| =lib/extract.pl=     | source tree + =.deb= files + logs -> facts               |
+| =lib/safe.pl=        | whitelisting interpreter for rule conditions             |
+| =lib/rules.pl=       | core rules AL01–AL11, helpers, learnable schemas         |
+| =lib/store.pl=       | append-only event files, snapshots                       |
+| =lib/tms.pl=         | derived rule status, justifications, severity caps       |
+| =lib/learn.pl=       | findings, proposals, induction, repair history           |
+| =lib/report.pl=      | text and JSON reports, =rules=, =why=                    |
+| =tests/=             | plunit suite                                             |
+| =doc/=               | the paper                                                |
+
+* Licence
+
+GPL-3.0-or-later.  See =LICENSE=.

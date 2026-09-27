@@ -1,0 +1,96 @@
+#+TITLE: antilint roadmap
+#+STARTUP: overview
+#+TODO: NEXT TODO SOMEDAY | DONE DROPPED
+
+* Principles
+
+1. antilint is a judge, not a scheduler.  It meets autopackager only
+   through its exit status and JSON report.
+2. Do not duplicate lintian.  Where lintian already has a check, make
+   lintian stricter instead of writing an antilint rule.
+3. No rule fails a build without a named human's endorsement, and the
+   gold corpus can always demote a rule.
+4. Finishability first: an item that does not move packages toward the
+   archive waits.
+
+* NEXT Wire antilint into autopackager
+Same success branch as =verify_install=.  In one change:
+- run lintian with =--no-override --fail-on error,warning= (=warning=
+  does not imply =error=; both must be named);
+- call =antilint check ... --attempt N --snapshot --json= after lintian;
+  a non-zero exit fails the iteration, and =violations= go into the
+  revision prompt;
+- record provenance with each snapshot: antilint commit, model, prompt
+  version, so a grade can be traced to the rule set that gave it.
+
+* DONE Correct the paper before it goes to anyone
+Both parts done.  Open: confirm who found F5 (the val externals/ .dll);
+the paper now attributes it to the model-assisted review.
+- The reviewed defects were found by an LLM-assisted review (Claude),
+  not "a human reading the output"; say so, including for F5.  The
+  recorded "bad" verdicts are that review, accepted by the author, not
+  yet checked by a Debian developer.
+- Add a section on overlap with lintian (AL02b, AL02c, AL04a) and on
+  running lintian at warning level.
+
+* TODO Rebuild the reviewed packages through the gate
+eprover, souffle, VAL, fast-downward, leo-iii, TESUJI, emacs-kb-atp,
+Jason.  Keep before/after =debian/= diffs.  Send a small sample (two or
+three) to an outside Debian developer for independent judgement; do not
+count antilint passing as the measure of improvement.
+
+* TODO Retire rules that duplicate lintian
+Once lintian runs at warning level, check each core rule against
+lintian's tags on the corpus and drop exact duplicates.  Keep the ones
+lintian cannot see.  Candidate: AL04a (lintian: empty-binary-package).
+NOT candidates while autopackager builds binary-only (=-b=): AL02b and
+AL02c.  A =-b= build's .changes lists no source package, so lintian's
+source checks (=patch-file-present-but-not-mentioned-in-series=, etc.)
+never run; antilint reads the tree and is the only check there.
+
+* TODO Archive versioning
+Unofficial suffix, e.g. =1.2-1~frdcsa1=, incremented on every
+republish; sorts below Debian's own =1.2-1=.  Needed before the signed
+repository, not before wiring.
+
+* TODO Rule overlap detection
+Only exact duplicates are merged today (same schema, same parameters).
+Compare rules extensionally: identical firing sets across snapshots are
+merge candidates; a strict subset suggests subsumption.  Compare schema
+parameters where the schema allows it (substring =test -f= subsumes
+=test -f build=).  Not textual entailment.  Becomes necessary once
+=induce= runs at scale.
+
+* SOMEDAY Debian Policy module
+A separate, optional module that brings Debian Policy into the rule
+base.  Deliberately deferred to avoid scope creep.
+
+** Stage 0: lintian bridge
+Partly exists: =--lintian F= already asserts =lintian_tag/3= facts.
+Remaining: keep overridden (=O:=) tags, and let rules and rationales
+refer to them.
+Lintian already encodes much of Policy, and its tags cite Policy
+sections, so this is the cheapest route to Policy-aware rules and
+rationales.  It also makes "fires exactly where a lintian tag fires"
+checkable, which serves principle 2.
+
+** Stage 1: Policy as data
+Take the Policy Manual (published as text and in the =debian-policy=
+package) and segment it into normative statements keyed by section and
+by the manual's own must/should/may wording, with the Policy version.
+
+** Stage 2: proposed rules from statements
+LLM-assisted mapping of a statement to an instance of an existing
+learnable schema, entered as a /proposed/ learned rule whose rationale
+cites the section.  Never auto-endorsed; the gold corpus demotes bad
+translations as it does any learned rule.  Statements that cannot be
+checked statically are recorded as candidates for behavioural checks,
+not forced into rules.
+
+** Stage 3: follow Policy releases
+Each Policy-derived rule records the Policy version it came from;
+a new release re-queues changed sections for review.
+
+** Guard
+A Policy-derived rule that fires on exactly the same subjects as an
+existing lintian tag is rejected as a duplicate.
